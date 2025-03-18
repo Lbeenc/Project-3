@@ -1,27 +1,23 @@
-/* oss.c - Parent Process */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
-#include <sys/shm.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
-#include <string.h>
 
 #define MAX_PROCESSES 20
-#define CLOCK_INCREMENT_MS 250
-#define PRINT_INTERVAL_NS 500000
+#define CLOCK_INCREMENT 250000000  // 250ms in nanoseconds
 
-// Define message structure
+// Message structure
 struct msgbuf {
     long mtype;
     int data;
 };
 
-// Define Process Control Block
+// Process Control Block
 struct PCB {
     int occupied;
     pid_t pid;
@@ -31,124 +27,122 @@ struct PCB {
 };
 
 struct PCB processTable[MAX_PROCESSES];
-
-// Shared memory for system clock
-int shm_id;
-int *sysClock;
+int sysClockS = 0, sysClockNano = 0;
 int msg_id;
-FILE *logfile;
 
-void cleanup(int signum) {
-    printf("\nTerminating... Cleaning up shared memory and message queue.\n");
+// Cleanup function
+void cleanup() {
+    msgctl(msg_id, IPC_RMID, NULL);
+    printf("OSS: Cleaning up message queue and exiting.\n");
+}
+
+// Signal handler for termination
+void handle_signal(int sig) {
+    printf("OSS: Caught signal %d. Terminating all workers.\n", sig);
     for (int i = 0; i < MAX_PROCESSES; i++) {
         if (processTable[i].occupied) {
             kill(processTable[i].pid, SIGTERM);
-            waitpid(processTable[i].pid, NULL, 0);
         }
     }
-    shmctl(shm_id, IPC_RMID, NULL);
-    msgctl(msg_id, IPC_RMID, NULL);
-    fclose(logfile);
+    cleanup();
     exit(0);
-}
-
-void incrementClock(int activeProcesses) {
-    int increment = CLOCK_INCREMENT_MS / (activeProcesses ? activeProcesses : 1);
-    *sysClock += increment;
-}
-
-void printProcessTable() {
-    fprintf(logfile, "\nOSS Process Table at time %d:\n", *sysClock);
-    fprintf(logfile, "Entry | Occupied | PID  | StartS | StartN | MsgSent\n");
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (processTable[i].occupied) {
-            fprintf(logfile, "%5d | %8d | %5d | %6d | %6d | %7d\n", i, processTable[i].occupied, processTable[i].pid,
-                    processTable[i].startSeconds, processTable[i].startNano, processTable[i].messagesSent);
-        }
-    }
 }
 
 int main(int argc, char *argv[]) {
     int n = 5, s = 3, t = 7, i = 100;
-    char *log_filename = "oss.log";
-    
-    signal(SIGINT, cleanup);
-    signal(SIGALRM, cleanup);
-    alarm(60);
-    
-    // Parse command line arguments
+    char logFileName[100] = "log.txt";
+
+    // Parse command-line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "hn:s:t:i:f:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:s:t:i:f:")) != -1) {
         switch (opt) {
             case 'n': n = atoi(optarg); break;
             case 's': s = atoi(optarg); break;
             case 't': t = atoi(optarg); break;
             case 'i': i = atoi(optarg); break;
-            case 'f': log_filename = optarg; break;
-            case 'h':
-                printf("Usage: oss [-n proc] [-s simul] [-t timelimit] [-i interval] [-f logfile]\n");
-                exit(0);
+            case 'f': strcpy(logFileName, optarg); break;
+            default:
+                fprintf(stderr, "Usage: %s -n proc -s simul -t time -i interval -f logfile\n", argv[0]);
+                exit(EXIT_FAILURE);
         }
     }
-    
-    logfile = fopen(log_filename, "w");
-    if (!logfile) {
-        perror("Failed to open log file");
-        exit(1);
-    }
-    
-    // Initialize shared memory
-    shm_id = shmget(IPC_PRIVATE, sizeof(int), IPC_CREAT | 0666);
-    sysClock = (int *)shmat(shm_id, NULL, 0);
-    *sysClock = 0;
-    
-    // Initialize message queue
-    msg_id = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
-    
-    for (int i = 0; i < MAX_PROCESSES; i++)
-        processTable[i].occupied = 0;
-    
-    int activeProcesses = 0;
-    int currentProcess = 0;
-    int lastPrintTime = 0;
-    
+
+    // Create message queue
+    key_t key = ftok("oss.c", 65);
+    msg_id = msgget(key, 0666 | IPC_CREAT);
+
+    // Setup signal handling
+    signal(SIGINT, handle_signal);
+    signal(SIGALRM, handle_signal);
+    alarm(60); // Terminate after 60 real seconds
+
+    int activeProcesses = 0, nextProcessIndex = 0;
+
+    // Fork workers
     while (activeProcesses < n) {
-        if (activeProcesses < s) {
-            int index = -1;
-            for (int j = 0; j < MAX_PROCESSES; j++) {
-                if (!processTable[j].occupied) {
-                    index = j;
-                    break;
-                }
-            }
-            if (index != -1) {
-                pid_t pid = fork();
-                if (pid == 0) {
-                    char sec[10], nano[10];
-                    sprintf(sec, "%d", rand() % t + 1);
-                    sprintf(nano, "%d", rand() % 1000000000);
-                    execl("./worker", "worker", sec, nano, NULL);
-                    perror("execl failed");
-                    exit(1);
-                } else {
-                    processTable[index].occupied = 1;
-                    processTable[index].pid = pid;
-                    processTable[index].startSeconds = *sysClock;
-                    processTable[index].messagesSent = 0;
-                    activeProcesses++;
-                    fprintf(logfile, "OSS: Launched process %d at %d\n", pid, *sysClock);
-                }
+        int freeSlot = -1;
+        for (int j = 0; j < MAX_PROCESSES; j++) {
+            if (!processTable[j].occupied) {
+                freeSlot = j;
+                break;
             }
         }
-        
-        if (*sysClock - lastPrintTime >= PRINT_INTERVAL_NS) {
-            printProcessTable();
-            lastPrintTime = *sysClock;
+        if (freeSlot == -1) {
+            printf("OSS: No available process slots.\n");
+            break;
         }
-        
-        incrementClock(activeProcesses);
+
+        pid_t pid = fork();
+        if (pid == 0) {  // Child process (Worker)
+            char s_time[10], ns_time[10];
+            sprintf(s_time, "%d", rand() % t + 1);
+            sprintf(ns_time, "%d", rand() % 1000000000);
+            execl("./worker", "./worker", s_time, ns_time, NULL);
+            perror("OSS: execl failed");
+            exit(1);
+        } else {  // Parent process (OSS)
+            printf("OSS: Forked worker PID %d at SysClock %d:%d\n", pid, sysClockS, sysClockNano);
+            processTable[freeSlot].occupied = 1;
+            processTable[freeSlot].pid = pid;
+            processTable[freeSlot].startSeconds = sysClockS;
+            processTable[freeSlot].startNano = sysClockNano;
+            processTable[freeSlot].messagesSent = 0;
+            activeProcesses++;
+        }
+
+        usleep(i * 1000);  // Launch interval
     }
-    
-    cleanup(0);
+
+    // Round-robin message passing
+    while (activeProcesses > 0) {
+        if (processTable[nextProcessIndex].occupied) {
+            struct msgbuf message;
+            message.mtype = processTable[nextProcessIndex].pid;
+            message.data = 1;
+
+            msgsnd(msg_id, &message, sizeof(message.data), 0);
+            processTable[nextProcessIndex].messagesSent++;
+
+            printf("OSS: Sent message to PID %d\n", processTable[nextProcessIndex].pid);
+
+            msgrcv(msg_id, &message, sizeof(message.data), processTable[nextProcessIndex].pid, 0);
+            printf("OSS: Received message from PID %d\n", processTable[nextProcessIndex].pid);
+
+            if (message.data == 0) {
+                waitpid(processTable[nextProcessIndex].pid, NULL, 0);
+                processTable[nextProcessIndex].occupied = 0;
+                activeProcesses--;
+                printf("OSS: Worker PID %d terminated\n", processTable[nextProcessIndex].pid);
+            }
+        }
+        nextProcessIndex = (nextProcessIndex + 1) % MAX_PROCESSES;
+        sysClockNano += CLOCK_INCREMENT / activeProcesses;
+        if (sysClockNano >= 1000000000) {
+            sysClockS++;
+            sysClockNano -= 1000000000;
+        }
+    }
+
+    cleanup();
     return 0;
 }

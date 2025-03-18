@@ -1,6 +1,14 @@
-all:
-	gcc -Wall -g -o oss oss.c
-	gcc -Wall -g -o worker worker.c
+CC = gcc
+CFLAGS = -Wall -g
+TARGETS = oss worker
+
+all: $(TARGETS)
+
+oss: oss.c
+	$(CC) $(CFLAGS) -o oss oss.c
+
+worker: worker.c
+	$(CC) $(CFLAGS) -o worker worker.c
 
 clean:
-	rm -f oss worker log.txt
+	rm -f $(TARGETS) *.o

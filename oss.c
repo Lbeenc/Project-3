@@ -38,23 +38,31 @@ struct Message {
 int shm_id, msg_id;
 struct Clock *clock_shm;
 FILE *log_file;
-int total_messages_sent = 0; // Track total messages
+int total_messages_sent = 0;  // Global counter for total messages sent
 
 // Signal handler for cleanup
 void cleanup(int sig) {
-    msgctl(msg_id, IPC_RMID, NULL);
-    shmdt(clock_shm);
-    shmctl(shm_id, IPC_RMID, NULL);
-    fclose(log_file);
-    
-    // Final summary
-    printf("\nFinal Summary:\n");
-    printf("Total Execution Time: %d seconds, %d nanoseconds\n", clock_shm->seconds, clock_shm->nanoseconds);
-    printf("Total Messages Sent: %d\n", total_messages_sent);
+    // Print Final Summary BEFORE freeing resources
+    if (clock_shm) {
+        printf("\nFinal Summary:\n");
+        printf("Total Execution Time: %d seconds, %d nanoseconds\n", clock_shm->seconds, clock_shm->nanoseconds);
+        printf("Total Messages Sent: %d\n", total_messages_sent);
 
-    fprintf(log_file, "\nFinal Summary:\n");
-    fprintf(log_file, "Total Execution Time: %d seconds, %d nanoseconds\n", clock_shm->seconds, clock_shm->nanoseconds);
-    fprintf(log_file, "Total Messages Sent: %d\n", total_messages_sent);
+        if (log_file) {
+            fprintf(log_file, "\nFinal Summary:\n");
+            fprintf(log_file, "Total Execution Time: %d seconds, %d nanoseconds\n", clock_shm->seconds, clock_shm->nanoseconds);
+            fprintf(log_file, "Total Messages Sent: %d\n", total_messages_sent);
+            fflush(log_file);
+        }
+    }
+
+    // Free resources
+    if (clock_shm) shmdt(clock_shm);
+    shmctl(shm_id, IPC_RMID, NULL);
+    msgctl(msg_id, IPC_RMID, NULL);
+
+    // Close log file
+    if (log_file) fclose(log_file);
 
     printf("\nCleaned up resources. Exiting...\n");
     exit(0);
@@ -74,19 +82,20 @@ void printProcessTable() {
     }
     printf("\n");
 
-    // Log to the file
-    fprintf(log_file, "\nOSS PID:%d SysClockS:%d SysClockNano:%d\n", getpid(), clock_shm->seconds, clock_shm->nanoseconds);
-    fprintf(log_file, "Process Table:\n");
-    fprintf(log_file, "Entry\tOccupied\tPID\tStartS\tStartN\tMessagesSent\n");
+    if (log_file) {
+        fprintf(log_file, "\nOSS PID:%d SysClockS:%d SysClockNano:%d\n", getpid(), clock_shm->seconds, clock_shm->nanoseconds);
+        fprintf(log_file, "Process Table:\n");
+        fprintf(log_file, "Entry\tOccupied\tPID\tStartS\tStartN\tMessagesSent\n");
 
-    for (int j = 0; j < MAX_PROCESSES; j++) {
-        fprintf(log_file, "%d\t%d\t\t%d\t%d\t%d\t%d\n",
-                j, processTable[j].occupied, processTable[j].pid,
-                processTable[j].startSeconds, processTable[j].startNano,
-                processTable[j].messagesSent);
+        for (int j = 0; j < MAX_PROCESSES; j++) {
+            fprintf(log_file, "%d\t%d\t\t%d\t%d\t%d\t%d\n",
+                    j, processTable[j].occupied, processTable[j].pid,
+                    processTable[j].startSeconds, processTable[j].startNano,
+                    processTable[j].messagesSent);
+        }
+        fprintf(log_file, "\n");
+        fflush(log_file);
     }
-    fprintf(log_file, "\n");
-    fflush(log_file);
 }
 
 int main(int argc, char *argv[]) {
@@ -113,7 +122,6 @@ int main(int argc, char *argv[]) {
         perror("Error opening log file");
         exit(EXIT_FAILURE);
     }
-    setbuf(log_file, NULL);  // Disable buffering for immediate writes
 
     // Setup shared memory
     key_t shm_key = ftok("shmfile", 65);
@@ -160,8 +168,6 @@ int main(int argc, char *argv[]) {
                     processTable[slot].messagesSent = 0;
                     process_count++;
                     active_processes++;
-
-                    // Print the process table after launching a new worker
                     printProcessTable();
                 }
             }
@@ -188,14 +194,13 @@ int main(int argc, char *argv[]) {
         if (active_processes > 0) {
             clock_shm->nanoseconds += 250000000 / active_processes;
         } else {
-            clock_shm->nanoseconds += 250000000;  // Prevent division by zero
+            clock_shm->nanoseconds += 250000000;
         }
         if (clock_shm->nanoseconds >= BILLION) {
             clock_shm->seconds++;
             clock_shm->nanoseconds -= BILLION;
         }
 
-        // Print the process table every 0.5 simulated seconds
         if (clock_shm->seconds * 1000 + clock_shm->nanoseconds / 1000000 >= last_print_time + 500) {
             printProcessTable();
             last_print_time = clock_shm->seconds * 1000 + clock_shm->nanoseconds / 1000000;
@@ -204,5 +209,5 @@ int main(int argc, char *argv[]) {
         usleep(100000);
     }
 
-    cleanup(0);  // Call cleanup to print final summary and exit
+    cleanup(0);
 }

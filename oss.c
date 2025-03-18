@@ -13,6 +13,7 @@
 
 #define MAX_PROCESSES 20
 #define CLOCK_INCREMENT_MS 250
+#define PRINT_INTERVAL_NS 500000
 
 // Define message structure
 struct msgbuf {
@@ -39,6 +40,12 @@ FILE *logfile;
 
 void cleanup(int signum) {
     printf("\nTerminating... Cleaning up shared memory and message queue.\n");
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (processTable[i].occupied) {
+            kill(processTable[i].pid, SIGTERM);
+            waitpid(processTable[i].pid, NULL, 0);
+        }
+    }
     shmctl(shm_id, IPC_RMID, NULL);
     msgctl(msg_id, IPC_RMID, NULL);
     fclose(logfile);
@@ -48,6 +55,17 @@ void cleanup(int signum) {
 void incrementClock(int activeProcesses) {
     int increment = CLOCK_INCREMENT_MS / (activeProcesses ? activeProcesses : 1);
     *sysClock += increment;
+}
+
+void printProcessTable() {
+    fprintf(logfile, "\nOSS Process Table at time %d:\n", *sysClock);
+    fprintf(logfile, "Entry | Occupied | PID  | StartS | StartN | MsgSent\n");
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (processTable[i].occupied) {
+            fprintf(logfile, "%5d | %8d | %5d | %6d | %6d | %7d\n", i, processTable[i].occupied, processTable[i].pid,
+                    processTable[i].startSeconds, processTable[i].startNano, processTable[i].messagesSent);
+        }
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -92,6 +110,7 @@ int main(int argc, char *argv[]) {
     
     int activeProcesses = 0;
     int currentProcess = 0;
+    int lastPrintTime = 0;
     
     while (activeProcesses < n) {
         if (activeProcesses < s) {
@@ -122,23 +141,9 @@ int main(int argc, char *argv[]) {
             }
         }
         
-        if (activeProcesses > 0) {
-            struct msgbuf message;
-            message.mtype = processTable[currentProcess].pid;
-            message.data = 1;
-            msgsnd(msg_id, &message, sizeof(message.data), 0);
-            
-            msgrcv(msg_id, &message, sizeof(message.data), 1, 0);
-            fprintf(logfile, "OSS: Received message from process %d\n", processTable[currentProcess].pid);
-            
-            if (message.data == 0) {
-                fprintf(logfile, "OSS: Process %d terminated\n", processTable[currentProcess].pid);
-                waitpid(processTable[currentProcess].pid, NULL, 0);
-                processTable[currentProcess].occupied = 0;
-                activeProcesses--;
-            }
-            
-            currentProcess = (currentProcess + 1) % MAX_PROCESSES;
+        if (*sysClock - lastPrintTime >= PRINT_INTERVAL_NS) {
+            printProcessTable();
+            lastPrintTime = *sysClock;
         }
         
         incrementClock(activeProcesses);

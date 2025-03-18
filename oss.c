@@ -7,7 +7,6 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
-#include <string.h>
 
 #define MAX_PROCESSES 20
 #define BILLION 1000000000
@@ -50,6 +49,35 @@ void cleanup(int sig) {
     exit(0);
 }
 
+// Function to print process table
+void printProcessTable() {
+    printf("\nOSS PID:%d SysClockS:%d SysClockNano:%d\n", getpid(), clock_shm->seconds, clock_shm->nanoseconds);
+    printf("Process Table:\n");
+    printf("Entry\tOccupied\tPID\tStartS\tStartN\tMessagesSent\n");
+
+    for (int j = 0; j < MAX_PROCESSES; j++) {
+        printf("%d\t%d\t\t%d\t%d\t%d\t%d\n",
+               j, processTable[j].occupied, processTable[j].pid,
+               processTable[j].startSeconds, processTable[j].startNano,
+               processTable[j].messagesSent);
+    }
+    printf("\n");
+
+    // Log to the file
+    fprintf(log_file, "\nOSS PID:%d SysClockS:%d SysClockNano:%d\n", getpid(), clock_shm->seconds, clock_shm->nanoseconds);
+    fprintf(log_file, "Process Table:\n");
+    fprintf(log_file, "Entry\tOccupied\tPID\tStartS\tStartN\tMessagesSent\n");
+
+    for (int j = 0; j < MAX_PROCESSES; j++) {
+        fprintf(log_file, "%d\t%d\t\t%d\t%d\t%d\t%d\n",
+                j, processTable[j].occupied, processTable[j].pid,
+                processTable[j].startSeconds, processTable[j].startNano,
+                processTable[j].messagesSent);
+    }
+    fprintf(log_file, "\n");
+    fflush(log_file);
+}
+
 int main(int argc, char *argv[]) {
     int n = 5, s = 2, t = 5, i = 100;
     char log_filename[100] = "oss.log";
@@ -70,6 +98,11 @@ int main(int argc, char *argv[]) {
 
     // Open log file
     log_file = fopen(log_filename, "w");
+    if (!log_file) {
+        perror("Error opening log file");
+        exit(EXIT_FAILURE);
+    }
+    setbuf(log_file, NULL);  // Disable buffering for immediate writes
 
     // Setup shared memory
     key_t shm_key = ftok("shmfile", 65);
@@ -89,10 +122,10 @@ int main(int argc, char *argv[]) {
 
     int process_count = 0;
     int active_processes = 0;
-    
+    int last_print_time = 0;
+
     while (process_count < n || active_processes > 0) {
         if (active_processes < s && process_count < n) {
-            // Find an empty slot
             int slot = -1;
             for (int j = 0; j < MAX_PROCESSES; j++) {
                 if (!processTable[j].occupied) {
@@ -100,7 +133,7 @@ int main(int argc, char *argv[]) {
                     break;
                 }
             }
-            
+
             if (slot != -1) {
                 pid_t pid = fork();
                 if (pid == 0) {
@@ -116,6 +149,9 @@ int main(int argc, char *argv[]) {
                     processTable[slot].messagesSent = 0;
                     process_count++;
                     active_processes++;
+
+                    // Print the process table after launching a new worker
+                    printProcessTable();
                 }
             }
         }
@@ -145,6 +181,12 @@ int main(int argc, char *argv[]) {
         if (clock_shm->nanoseconds >= BILLION) {
             clock_shm->seconds++;
             clock_shm->nanoseconds -= BILLION;
+        }
+
+        // Print the process table every 0.5 simulated seconds
+        if (clock_shm->seconds * 1000 + clock_shm->nanoseconds / 1000000 >= last_print_time + 500) {
+            printProcessTable();
+            last_print_time = clock_shm->seconds * 1000 + clock_shm->nanoseconds / 1000000;
         }
 
         usleep(100000);

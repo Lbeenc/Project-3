@@ -7,10 +7,12 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+#include <string.h>
 
 #define MAX_PROCESSES 20
+#define BILLION 1000000000
 
-// Process Control Block
+// Process Control Block (PCB)
 struct PCB {
     int occupied;
     pid_t pid;
@@ -49,7 +51,7 @@ void cleanup(int sig) {
 }
 
 int main(int argc, char *argv[]) {
-    int n = 5, s = 3, t = 5, i = 100;
+    int n = 5, s = 2, t = 5, i = 100;
     char log_filename[100] = "oss.log";
 
     int opt;
@@ -104,7 +106,7 @@ int main(int argc, char *argv[]) {
                 if (pid == 0) {
                     char sec[10], nano[10];
                     sprintf(sec, "%d", rand() % t + 1);
-                    sprintf(nano, "%d", rand() % 1000000000);
+                    sprintf(nano, "%d", rand() % BILLION);
                     execl("./worker", "worker", sec, nano, NULL);
                 } else {
                     processTable[slot].occupied = 1;
@@ -135,10 +137,14 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        clock_shm->nanoseconds += 250000000 / active_processes;
-        if (clock_shm->nanoseconds >= 1000000000) {
+        if (active_processes > 0) {
+            clock_shm->nanoseconds += 250000000 / active_processes;
+        } else {
+            clock_shm->nanoseconds += 250000000;  // Prevent division by zero
+        }
+        if (clock_shm->nanoseconds >= BILLION) {
             clock_shm->seconds++;
-            clock_shm->nanoseconds -= 1000000000;
+            clock_shm->nanoseconds -= BILLION;
         }
 
         usleep(100000);

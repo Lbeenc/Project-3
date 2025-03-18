@@ -1,15 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
 #include <time.h>
+#include <string.h>
 
 #define MAX_PROCESSES 20
-#define CLOCK_INCREMENT 250000000  // 250ms in nanoseconds
 
 // Message structure
 struct msgbuf {
@@ -26,18 +26,24 @@ struct PCB {
     int messagesSent;
 };
 
+// Global Variables
 struct PCB processTable[MAX_PROCESSES];
-int sysClockS = 0, sysClockNano = 0;
-int msg_id;
+int msgQueueID;
+FILE *logFile;
 
-// Cleanup function
+// Shared clock
+int clockSeconds = 0, clockNano = 0;
+int totalProcesses = 0, totalMessagesSent = 0;
+
+// Cleanup on exit
 void cleanup() {
-    msgctl(msg_id, IPC_RMID, NULL);
-    printf("OSS: Cleaning up message queue and exiting.\n");
+    msgctl(msgQueueID, IPC_RMID, NULL);
+    fclose(logFile);
+    printf("OSS: Cleanup complete.\n");
 }
 
 // Signal handler for termination
-void handle_signal(int sig) {
+void signalHandler(int sig) {
     printf("OSS: Caught signal %d. Terminating all workers.\n", sig);
     for (int i = 0; i < MAX_PROCESSES; i++) {
         if (processTable[i].occupied) {
@@ -48,106 +54,125 @@ void handle_signal(int sig) {
     exit(0);
 }
 
+// Increment clock
+void incrementClock(int numChildren) {
+    int increment = (numChildren > 0) ? (250000000 / numChildren) : 250000000;
+    clockNano += increment;
+    if (clockNano >= 1000000000) {
+        clockSeconds++;
+        clockNano -= 1000000000;
+    }
+}
+
+// Launch a worker process
+void launchWorker(int index, int maxLifetime) {
+    if (processTable[index].occupied) return;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        char secArg[10], nanoArg[10];
+        snprintf(secArg, sizeof(secArg), "%d", (rand() % maxLifetime) + 1);
+        snprintf(nanoArg, sizeof(nanoArg), "%d", rand() % 1000000000);
+        execl("./worker", "./worker", secArg, nanoArg, NULL);
+        perror("OSS: Exec failed");
+        exit(1);
+    }
+
+    processTable[index].occupied = 1;
+    processTable[index].pid = pid;
+    processTable[index].startSeconds = clockSeconds;
+    processTable[index].startNano = clockNano;
+    processTable[index].messagesSent = 0;
+
+    totalProcesses++;
+    fprintf(logFile, "OSS: Launched worker %d at %d:%d\n", pid, clockSeconds, clockNano);
+    fflush(logFile);
+}
+
 int main(int argc, char *argv[]) {
-    int n = 5, t = 7, i = 100;
-    char logFileName[100] = "log.txt";
+    int maxProcesses = 5, maxSimultaneous = 3, maxLifetime = 7, interval = 100;
+    char logFileName[50] = "log.txt";
 
     // Parse command-line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "n:t:i:f:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:s:t:i:f:")) != -1) {
         switch (opt) {
-            case 'n': n = atoi(optarg); break;
-            case 't': t = atoi(optarg); break;
-            case 'i': i = atoi(optarg); break;
+            case 'n': maxProcesses = atoi(optarg); break;
+            case 's': maxSimultaneous = atoi(optarg); break;
+            case 't': maxLifetime = atoi(optarg); break;
+            case 'i': interval = atoi(optarg); break;
             case 'f': strcpy(logFileName, optarg); break;
             default:
-                fprintf(stderr, "Usage: %s -n proc -t time -i interval -f logfile\n", argv[0]);
+                fprintf(stderr, "Usage: %s -n [proc] -s [simul] -t [lifetime] -i [interval] -f [logfile]\n", argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
 
-    // Create message queue
-    key_t key = ftok("oss.c", 65);
-    msg_id = msgget(key, 0666 | IPC_CREAT);
-
-    // Setup signal handling
-    signal(SIGINT, handle_signal);
-    signal(SIGALRM, handle_signal);
-    alarm(60); // Terminate after 60 real seconds
-
-    int activeProcesses = 0, nextProcessIndex = 0;
-
-    // Fork workers
-    while (activeProcesses < n) {
-        int freeSlot = -1;
-        for (int j = 0; j < MAX_PROCESSES; j++) {
-            if (!processTable[j].occupied) {
-                freeSlot = j;
-                break;
-            }
-        }
-        if (freeSlot == -1) {
-            printf("OSS: No available process slots.\n");
-            break;
-        }
-
-        pid_t pid = fork();
-        if (pid == 0) {  // Child process (Worker)
-            char s_time[10], ns_time[10];
-            sprintf(s_time, "%d", rand() % t + 1);
-            sprintf(ns_time, "%d", rand() % 1000000000);
-            execl("./worker", "./worker", s_time, ns_time, NULL);
-            perror("OSS: execl failed");
-            exit(1);
-        } else {  // Parent process (OSS)
-            printf("OSS: Forked worker PID %d at SysClock %d:%d\n", pid, sysClockS, sysClockNano);
-            processTable[freeSlot].occupied = 1;
-            processTable[freeSlot].pid = pid;
-            processTable[freeSlot].startSeconds = sysClockS;
-            processTable[freeSlot].startNano = sysClockNano;
-            processTable[freeSlot].messagesSent = 0;
-            activeProcesses++;
-        }
-
-        usleep(i * 1000);  // Launch interval
+    // Setup message queue
+    key_t key = ftok(".", 'm');
+    msgQueueID = msgget(key, IPC_CREAT | 0666);
+    if (msgQueueID == -1) {
+        perror("OSS: Failed to create message queue");
+        exit(1);
     }
 
-    // Round-robin message passing
-    while (activeProcesses > 0) {
-        if (processTable[nextProcessIndex].occupied) {
+    // Open log file
+    logFile = fopen(logFileName, "w");
+    if (!logFile) {
+        perror("OSS: Cannot open log file");
+        exit(1);
+    }
+
+    // Signal handling
+    signal(SIGINT, signalHandler);
+    signal(SIGALRM, signalHandler);
+    alarm(60);
+
+    // Main process loop
+    int runningChildren = 0, nextProcess = 0;
+    while (totalProcesses < maxProcesses || runningChildren > 0) {
+        incrementClock(runningChildren);
+
+        // Send a message to the next process
+        if (runningChildren > 0) {
             struct msgbuf message;
-            message.mtype = processTable[nextProcessIndex].pid;
+            message.mtype = processTable[nextProcess].pid;
             message.data = 1;
+            msgsnd(msgQueueID, &message, sizeof(message.data), 0);
+            processTable[nextProcess].messagesSent++;
+            totalMessagesSent++;
 
-            msgsnd(msg_id, &message, sizeof(message.data), 0);
-            processTable[nextProcessIndex].messagesSent++;
+            fprintf(logFile, "OSS: Sent message to PID %d at %d:%d\n", processTable[nextProcess].pid, clockSeconds, clockNano);
+            fflush(logFile);
+        }
 
-            printf("OSS: Sent message to PID %d\n", processTable[nextProcessIndex].pid);
-
-            msgrcv(msg_id, &message, sizeof(message.data), processTable[nextProcessIndex].pid, 0);
-            printf("OSS: Received message from PID %d\n", processTable[nextProcessIndex].pid);
-
-            if (message.data == 0) {  // Worker is terminating
-                printf("OSS: Worker PID %d is terminating.\n", processTable[nextProcessIndex].pid);
-                
-                // Clean up process table
-                waitpid(processTable[nextProcessIndex].pid, NULL, 0);
-                processTable[nextProcessIndex].occupied = 0;
-                
-                activeProcesses--;  // Decrease active process count
+        // Receive a message from worker
+        struct msgbuf response;
+        if (msgrcv(msgQueueID, &response, sizeof(response.data), 0, IPC_NOWAIT) > 0) {
+            int workerIndex = -1;
+            for (int i = 0; i < MAX_PROCESSES; i++) {
+                if (processTable[i].pid == response.mtype) {
+                    workerIndex = i;
+                    break;
+                }
+            }
+            if (workerIndex != -1 && response.data == 0) {
+                fprintf(logFile, "OSS: Worker PID %d is terminating.\n", processTable[workerIndex].pid);
+                fflush(logFile);
+                processTable[workerIndex].occupied = 0;
+                runningChildren--;
             }
         }
-        nextProcessIndex = (nextProcessIndex + 1) % MAX_PROCESSES;
 
-        // stops dividing by zero
-        if (activeProcesses > 0) {
-            sysClockNano += CLOCK_INCREMENT / activeProcesses;
+        // Launch new workers
+        if (totalProcesses < maxProcesses && runningChildren < maxSimultaneous) {
+            launchWorker(totalProcesses, maxLifetime);
+            runningChildren++;
         }
 
-        if (sysClockNano >= 1000000000) {
-            sysClockS++;
-            sysClockNano -= 1000000000;
-        }
+        // Select next process for messaging
+        nextProcess = (nextProcess + 1) % MAX_PROCESSES;
+        usleep(interval * 1000);
     }
 
     cleanup();

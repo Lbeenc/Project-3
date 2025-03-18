@@ -24,7 +24,7 @@ This will generate the `oss` and `worker` executables.
 
 ### Example:
 ```
-./oss -n 5 -s 3 -t 7 -i 100 -f log.txt
+./oss -n 5 -s 2 -t 10 -i 100 -f oss.log
 ```
 
 ## Cleanup

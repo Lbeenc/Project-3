@@ -1,15 +1,6 @@
-# Makefile for oss and worker
-
-CC = gcc
-CFLAGS = -Wall -g
-
-all: oss worker
-
-oss: oss.c
-	$(CC) $(CFLAGS) -o oss oss.c
-
-worker: worker.c
-	$(CC) $(CFLAGS) -o worker worker.c
+all:
+	gcc -Wall -g -o oss oss.c
+	gcc -Wall -g -o worker worker.c
 
 clean:
-	rm -f oss worker
+	rm -f oss worker log.txt

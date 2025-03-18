@@ -11,48 +11,35 @@ struct msgbuf {
 };
 
 int main(int argc, char *argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <seconds> <nanoseconds>\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "Usage: worker seconds nanoseconds\n");
         exit(1);
     }
 
-    int termSeconds = atoi(argv[1]);
+    int termSec = atoi(argv[1]);
     int termNano = atoi(argv[2]);
-    int sysClockS = 0, sysClockNano = 0;
 
-    key_t key = ftok("oss.c", 65);
-    int msg_id = msgget(key, 0666);
-
-    printf("WORKER PID:%d -- Started, will run for %d sec %d ns\n", getpid(), termSeconds, termNano);
+    key_t key = ftok(".", 'm');
+    int msgQueueID = msgget(key, 0666);
+    if (msgQueueID == -1) {
+        perror("Worker: Message queue error");
+        exit(1);
+    }
 
     while (1) {
         struct msgbuf message;
-        msgrcv(msg_id, &message, sizeof(message.data), getpid(), 0);
-        
-        // Simulate time passing in the system clock
-        sysClockNano += 50000000;  // Increment by 50ms
-        if (sysClockNano >= 1000000000) {
-            sysClockS++;
-            sysClockNano -= 1000000000;
-        }
+        msgrcv(msgQueueID, &message, sizeof(message.data), getpid(), 0);
 
-        printf("WORKER PID:%d -- Received message at SysClock %d:%d\n", getpid(), sysClockS, sysClockNano);
+        printf("WORKER PID:%d -- Received message at SysClock %d:%d\n", getpid(), termSec, termNano);
 
-        // Check termination condition
-        if (sysClockS > termSeconds || (sysClockS == termSeconds && sysClockNano >= termNano)) {
-            printf("WORKER PID:%d -- Terminating at SysClock %d:%d\n", getpid(), sysClockS, sysClockNano);
-            
-            // Send termination message to oss
+        if (termSec <= 2) {
+            message.mtype = getpid();
             message.data = 0;
-            msgsnd(msg_id, &message, sizeof(message.data), 0);
-            
-            break;  // Exit loop
-        } else {
-            // Send a message back to oss indicating still running
-            message.data = 1;
-            msgsnd(msg_id, &message, sizeof(message.data), 0);
+            msgsnd(msgQueueID, &message, sizeof(message.data), 0);
+            printf("WORKER PID:%d -- Terminating at SysClock %d:%d\n", getpid(), termSec, termNano);
+            exit(0);
         }
-    }
 
-    return 0;  // Ensure the function ends properly
+        termSec--;
+    }
 }

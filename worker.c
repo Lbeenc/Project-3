@@ -40,7 +40,5 @@ int main(int argc, char *argv[]) {
         msgsnd(msg_id, &message, sizeof(message.data), 0);
     }
 
-    return 0;
-}
-
+    return 0;  // Ensure the function ends properly
 }

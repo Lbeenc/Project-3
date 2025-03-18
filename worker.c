@@ -1,13 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/ipc.h>
-#include <sys/msg.h>
 #include <sys/shm.h>
-
-#define CLOCK_KEY 1234
-#define MSG_KEY 5678
+#include <sys/msg.h>
 
 struct Clock {
     int seconds;
@@ -15,50 +11,48 @@ struct Clock {
 };
 
 struct Message {
-    long mtype;
-    int data;
+    long type;
+    int value;
 };
 
 int main(int argc, char *argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: worker <seconds> <nanoseconds>\n");
-        exit(1);
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s <seconds> <nanoseconds>\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
-    int durationSec = atoi(argv[1]);
-    int durationNano = atoi(argv[2]);
+    int term_sec = atoi(argv[1]);
+    int term_nano = atoi(argv[2]);
 
-    int shmid = shmget(CLOCK_KEY, sizeof(struct Clock), 0666);
-    struct Clock *clockPtr = (struct Clock *)shmat(shmid, NULL, 0);
+    key_t shm_key = ftok("shmfile", 65);
+    int shm_id = shmget(shm_key, sizeof(struct Clock), 0666);
+    struct Clock *clock_shm = (struct Clock *)shmat(shm_id, NULL, 0);
 
-    int msqid = msgget(MSG_KEY, 0666);
-    struct Message msg;
-    int targetSec = clockPtr->seconds + durationSec;
-    int targetNano = clockPtr->nanoseconds + durationNano;
-    
-    if (targetNano >= 1000000000) {
-        targetSec++;
-        targetNano -= 1000000000;
-    }
+    key_t msg_key = ftok("msgfile", 65);
+    int msg_id = msgget(msg_key, 0666);
 
-    do {
-        msgrcv(msqid, &msg, sizeof(int), getpid(), 0);
+    printf("WORKER PID:%d PPID:%d TermTimeS:%d TermTimeNano:%d -- Just Starting\n",
+           getpid(), getppid(), term_sec, term_nano);
 
-        printf("WORKER PID:%d SysClockS:%d SysClockNano:%d TermTimeS:%d TermTimeNano:%d\n",
-               getpid(), clockPtr->seconds, clockPtr->nanoseconds, targetSec, targetNano);
+    int iterations = 0;
+    while (1) {
+        struct Message msg;
+        msgrcv(msg_id, &msg, sizeof(msg.value), getpid(), 0);
+        printf("WORKER PID:%d SysClockS:%d SysClockNano:%d -- %d iterations passed\n",
+               getpid(), clock_shm->seconds, clock_shm->nanoseconds, ++iterations);
 
-        if (clockPtr->seconds > targetSec ||
-            (clockPtr->seconds == targetSec && clockPtr->nanoseconds >= targetNano)) {
-            msg.data = 0;
-            msgsnd(msqid, &msg, sizeof(int), 0);
-            printf("WORKER PID:%d -- Terminating.\n", getpid());
+        if (clock_shm->seconds >= term_sec && clock_shm->nanoseconds >= term_nano) {
+            msg.value = 0;
+            msgsnd(msg_id, &msg, sizeof(msg.value), 0);
+            printf("WORKER PID:%d -- Terminating\n", getpid());
             break;
         } else {
-            msg.data = 1;
-            msgsnd(msqid, &msg, sizeof(int), 0);
+            msg.value = 1;
+            msgsnd(msg_id, &msg, sizeof(msg.value), 0);
         }
-    } while (1);
+    }
 
-    return 0;
+    shmdt(clock_shm);
+    exit(0);
 }
 

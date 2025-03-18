@@ -138,7 +138,12 @@ int main(int argc, char *argv[]) {
             }
         }
         nextProcessIndex = (nextProcessIndex + 1) % MAX_PROCESSES;
-        sysClockNano += CLOCK_INCREMENT / activeProcesses;
+
+        // stops dividing by zero
+        if (activeProcesses > 0) {
+            sysClockNano += CLOCK_INCREMENT / activeProcesses;
+        }
+
         if (sysClockNano >= 1000000000) {
             sysClockS++;
             sysClockNano -= 1000000000;

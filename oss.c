@@ -191,6 +191,15 @@ int main(int argc, char *argv[]) {
 
         usleep(100000);
     }
+    
+    printf("\nFinal Summary:\n");
+printf("Total workers launched: %d\n", process_count);
+printf("Total messages sent: %d\n", total_messages_sent);
+
+fprintf(log_file, "\nFinal Summary:\n");
+fprintf(log_file, "Total workers launched: %d\n", process_count);
+fprintf(log_file, "Total messages sent: %d\n", total_messages_sent);
+fflush(log_file);
 
     cleanup(0);
 }

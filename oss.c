@@ -49,20 +49,19 @@ void handle_signal(int sig) {
 }
 
 int main(int argc, char *argv[]) {
-    int n = 5, s = 3, t = 7, i = 100;
+    int n = 5, t = 7, i = 100;
     char logFileName[100] = "log.txt";
 
     // Parse command-line arguments
     int opt;
-    while ((opt = getopt(argc, argv, "n:s:t:i:f:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:t:i:f:")) != -1) {
         switch (opt) {
             case 'n': n = atoi(optarg); break;
-            case 's': s = atoi(optarg); break;
             case 't': t = atoi(optarg); break;
             case 'i': i = atoi(optarg); break;
             case 'f': strcpy(logFileName, optarg); break;
             default:
-                fprintf(stderr, "Usage: %s -n proc -s simul -t time -i interval -f logfile\n", argv[0]);
+                fprintf(stderr, "Usage: %s -n proc -t time -i interval -f logfile\n", argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
@@ -128,11 +127,14 @@ int main(int argc, char *argv[]) {
             msgrcv(msg_id, &message, sizeof(message.data), processTable[nextProcessIndex].pid, 0);
             printf("OSS: Received message from PID %d\n", processTable[nextProcessIndex].pid);
 
-            if (message.data == 0) {
+            if (message.data == 0) {  // Worker is terminating
+                printf("OSS: Worker PID %d is terminating.\n", processTable[nextProcessIndex].pid);
+                
+                // Clean up process table
                 waitpid(processTable[nextProcessIndex].pid, NULL, 0);
                 processTable[nextProcessIndex].occupied = 0;
-                activeProcesses--;
-                printf("OSS: Worker PID %d terminated\n", processTable[nextProcessIndex].pid);
+                
+                activeProcesses--;  // Decrease active process count
             }
         }
         nextProcessIndex = (nextProcessIndex + 1) % MAX_PROCESSES;

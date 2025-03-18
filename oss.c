@@ -39,6 +39,9 @@ int shm_id, msg_id;
 struct Clock *clock_shm;
 FILE *log_file;
 
+// Global variable to keep track of total messages sent
+int total_messages_sent = 0;
+
 // Signal handler for cleanup
 void cleanup(int sig) {
     msgctl(msg_id, IPC_RMID, NULL);
@@ -163,6 +166,7 @@ int main(int argc, char *argv[]) {
                 msg.value = 1;
                 msgsnd(msg_id, &msg, sizeof(msg.value), 0);
                 processTable[j].messagesSent++;
+                total_messages_sent++;
 
                 msgrcv(msg_id, &msg, sizeof(msg.value), processTable[j].pid, 0);
                 if (msg.value == 0) {
@@ -191,15 +195,15 @@ int main(int argc, char *argv[]) {
 
         usleep(100000);
     }
-    
-    printf("\nFinal Summary:\n");
-printf("Total workers launched: %d\n", process_count);
-printf("Total messages sent: %d\n", total_messages_sent);
 
-fprintf(log_file, "\nFinal Summary:\n");
-fprintf(log_file, "Total workers launched: %d\n", process_count);
-fprintf(log_file, "Total messages sent: %d\n", total_messages_sent);
-fflush(log_file);
+    printf("\nFinal Summary:\n");
+    printf("Total workers launched: %d\n", process_count);
+    printf("Total messages sent: %d\n", total_messages_sent);
+
+    fprintf(log_file, "\nFinal Summary:\n");
+    fprintf(log_file, "Total workers launched: %d\n", process_count);
+    fprintf(log_file, "Total messages sent: %d\n", total_messages_sent);
+    fflush(log_file);
 
     cleanup(0);
 }

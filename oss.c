@@ -1,210 +1,208 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/ipc.h>
-#include <sys/msg.h>
 #include <sys/shm.h>
+#include <sys/msg.h>
 #include <sys/wait.h>
 #include <signal.h>
-#include <string.h>
 #include <time.h>
 
 #define MAX_PROCESSES 20
 #define BILLION 1000000000
 
-typedef struct {
-    int occupied;        // Slot is occupied or not
-    pid_t pid;           // Process ID
-    int startSeconds;    // Time worker was created
-    int startNano;       // Time worker was created
-    int messagesSent;    // Number of messages sent
-} PCB;
+// Process Control Block (PCB)
+struct PCB {
+    int occupied;
+    pid_t pid;
+    int startSeconds;
+    int startNano;
+    int messagesSent;
+};
 
-typedef struct {
-    long mtype;
-    int message;
-} Message;
+struct PCB processTable[MAX_PROCESSES] = {0};
 
-// Global Variables
-PCB processTable[MAX_PROCESSES];
-int shmClockID, msgQueueID;
-int *shmClock;
-FILE *logFile;
-int totalMessagesSent = 0;
-int processCount = 0;
-int activeProcesses = 0;
+// Shared Memory Clock
+struct Clock {
+    int seconds;
+    int nanoseconds;
+};
 
-// Function Declarations
-void cleanup(int signal);
-void incrementClock(int processes);
-void printProcessTable();
-int findEmptyPCBSlot();
-void launchWorker(int slot, int maxTime);
-void handleChildTermination();
+// Message Structure
+struct Message {
+    long type;
+    int value;
+};
+
+// Shared memory and message queue IDs
+int shm_id, msg_id;
+struct Clock *clock_shm;
+FILE *log_file;
+int total_messages_sent = 0; // Track total messages
+
+// Signal handler for cleanup
+void cleanup(int sig) {
+    msgctl(msg_id, IPC_RMID, NULL);
+    shmdt(clock_shm);
+    shmctl(shm_id, IPC_RMID, NULL);
+    fclose(log_file);
+    
+    // Final summary
+    printf("\nFinal Summary:\n");
+    printf("Total Execution Time: %d seconds, %d nanoseconds\n", clock_shm->seconds, clock_shm->nanoseconds);
+    printf("Total Messages Sent: %d\n", total_messages_sent);
+
+    fprintf(log_file, "\nFinal Summary:\n");
+    fprintf(log_file, "Total Execution Time: %d seconds, %d nanoseconds\n", clock_shm->seconds, clock_shm->nanoseconds);
+    fprintf(log_file, "Total Messages Sent: %d\n", total_messages_sent);
+
+    printf("\nCleaned up resources. Exiting...\n");
+    exit(0);
+}
+
+// Function to print process table
+void printProcessTable() {
+    printf("\nOSS PID:%d SysClockS:%d SysClockNano:%d\n", getpid(), clock_shm->seconds, clock_shm->nanoseconds);
+    printf("Process Table:\n");
+    printf("Entry\tOccupied\tPID\tStartS\tStartN\tMessagesSent\n");
+
+    for (int j = 0; j < MAX_PROCESSES; j++) {
+        printf("%d\t%d\t\t%d\t%d\t%d\t%d\n",
+               j, processTable[j].occupied, processTable[j].pid,
+               processTable[j].startSeconds, processTable[j].startNano,
+               processTable[j].messagesSent);
+    }
+    printf("\n");
+
+    // Log to the file
+    fprintf(log_file, "\nOSS PID:%d SysClockS:%d SysClockNano:%d\n", getpid(), clock_shm->seconds, clock_shm->nanoseconds);
+    fprintf(log_file, "Process Table:\n");
+    fprintf(log_file, "Entry\tOccupied\tPID\tStartS\tStartN\tMessagesSent\n");
+
+    for (int j = 0; j < MAX_PROCESSES; j++) {
+        fprintf(log_file, "%d\t%d\t\t%d\t%d\t%d\t%d\n",
+                j, processTable[j].occupied, processTable[j].pid,
+                processTable[j].startSeconds, processTable[j].startNano,
+                processTable[j].messagesSent);
+    }
+    fprintf(log_file, "\n");
+    fflush(log_file);
+}
 
 int main(int argc, char *argv[]) {
-    int opt, n = 5, s = 2, t = 5, i = 100;
-    char *logFileName = "oss.log";
+    int n = 5, s = 2, t = 5, i = 100;
+    char log_filename[100] = "oss.log";
 
+    int opt;
     while ((opt = getopt(argc, argv, "n:s:t:i:f:")) != -1) {
         switch (opt) {
             case 'n': n = atoi(optarg); break;
             case 's': s = atoi(optarg); break;
             case 't': t = atoi(optarg); break;
             case 'i': i = atoi(optarg); break;
-            case 'f': logFileName = optarg; break;
+            case 'f': snprintf(log_filename, sizeof(log_filename), "%s", optarg); break;
             default:
-                fprintf(stderr, "Usage: %s [-n proc] [-s simul] [-t max_time] [-i interval] [-f logfile]\n", argv[0]);
+                fprintf(stderr, "Usage: %s -n proc -s simul -t timelimit -i interval -f logfile\n", argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
 
-    logFile = fopen(logFileName, "w");
-    if (!logFile) {
+    // Open log file
+    log_file = fopen(log_filename, "w");
+    if (!log_file) {
         perror("Error opening log file");
         exit(EXIT_FAILURE);
     }
+    setbuf(log_file, NULL);  // Disable buffering for immediate writes
 
-    // Setup Shared Memory for Simulated Clock
-    shmClockID = shmget(IPC_PRIVATE, sizeof(int) * 2, IPC_CREAT | 0666);
-    if (shmClockID == -1) {
-        perror("shmget failed");
-        exit(EXIT_FAILURE);
-    }
-    shmClock = (int *)shmat(shmClockID, NULL, 0);
-    shmClock[0] = 0; // Seconds
-    shmClock[1] = 0; // Nanoseconds
+    // Setup shared memory
+    key_t shm_key = ftok("shmfile", 65);
+    shm_id = shmget(shm_key, sizeof(struct Clock), 0666 | IPC_CREAT);
+    clock_shm = (struct Clock *)shmat(shm_id, NULL, 0);
+    clock_shm->seconds = 0;
+    clock_shm->nanoseconds = 0;
 
-    // Setup Message Queue
-    msgQueueID = msgget(IPC_PRIVATE, IPC_CREAT | 0666);
-    if (msgQueueID == -1) {
-        perror("msgget failed");
-        exit(EXIT_FAILURE);
-    }
+    // Setup message queue
+    key_t msg_key = ftok("msgfile", 65);
+    msg_id = msgget(msg_key, 0666 | IPC_CREAT);
 
-    // Handle Ctrl+C and timeout signals
+    // Handle signals
     signal(SIGINT, cleanup);
     signal(SIGALRM, cleanup);
-    alarm(60); // 60-second real-time timeout
+    alarm(60);  // Terminate after 60 seconds
 
-    // Initialize Process Table
-    memset(processTable, 0, sizeof(processTable));
+    int process_count = 0;
+    int active_processes = 0;
+    int last_print_time = 0;
 
-    // Main Execution Loop
-    while (processCount < n || activeProcesses > 0) {
-        incrementClock(activeProcesses);
-
-        if (processCount < n && activeProcesses < s) {
-            int slot = findEmptyPCBSlot();
-            if (slot != -1) {
-                launchWorker(slot, t);
+    while (process_count < n || active_processes > 0) {
+        if (active_processes < s && process_count < n) {
+            int slot = -1;
+            for (int j = 0; j < MAX_PROCESSES; j++) {
+                if (!processTable[j].occupied) {
+                    slot = j;
+                    break;
+                }
             }
-        }
 
-        // Sending Messages in Round-Robin Fashion
-        for (int j = 0; j < MAX_PROCESSES; j++) {
-            if (processTable[j].occupied) {
-                Message message = { .mtype = processTable[j].pid, .message = 1 };
-                msgsnd(msgQueueID, &message, sizeof(message), 0);
-                processTable[j].messagesSent++;
-                totalMessagesSent++;
+            if (slot != -1) {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    char sec[10], nano[10];
+                    sprintf(sec, "%d", rand() % t + 1);
+                    sprintf(nano, "%d", rand() % BILLION);
+                    execl("./worker", "worker", sec, nano, NULL);
+                } else {
+                    processTable[slot].occupied = 1;
+                    processTable[slot].pid = pid;
+                    processTable[slot].startSeconds = clock_shm->seconds;
+                    processTable[slot].startNano = clock_shm->nanoseconds;
+                    processTable[slot].messagesSent = 0;
+                    process_count++;
+                    active_processes++;
 
-                fprintf(logFile, "OSS: Sent message to worker %d PID %d at %d:%d\n",
-                        j, processTable[j].pid, shmClock[0], shmClock[1]);
-                fflush(logFile);
-
-                msgrcv(msgQueueID, &message, sizeof(message), processTable[j].pid, 0);
-                fprintf(logFile, "OSS: Received message from worker %d PID %d at %d:%d\n",
-                        j, processTable[j].pid, shmClock[0], shmClock[1]);
-
-                if (message.message == 0) {
-                    fprintf(logFile, "OSS: Worker %d PID %d is terminating.\n", j, processTable[j].pid);
-                    processTable[j].occupied = 0;
-                    activeProcesses--;
-                    waitpid(processTable[j].pid, NULL, 0);
+                    // Print the process table after launching a new worker
+                    printProcessTable();
                 }
             }
         }
 
-        // Print Process Table Every 0.5 Simulated Seconds
-        if (shmClock[1] % (500000000) == 0) {
-            printProcessTable();
+        for (int j = 0; j < MAX_PROCESSES; j++) {
+            if (processTable[j].occupied) {
+                struct Message msg;
+                msg.type = processTable[j].pid;
+                msg.value = 1;
+                msgsnd(msg_id, &msg, sizeof(msg.value), 0);
+                processTable[j].messagesSent++;
+                total_messages_sent++;
+
+                msgrcv(msg_id, &msg, sizeof(msg.value), processTable[j].pid, 0);
+                if (msg.value == 0) {
+                    waitpid(processTable[j].pid, NULL, 0);
+                    processTable[j].occupied = 0;
+                    active_processes--;
+                }
+            }
         }
+
+        if (active_processes > 0) {
+            clock_shm->nanoseconds += 250000000 / active_processes;
+        } else {
+            clock_shm->nanoseconds += 250000000;  // Prevent division by zero
+        }
+        if (clock_shm->nanoseconds >= BILLION) {
+            clock_shm->seconds++;
+            clock_shm->nanoseconds -= BILLION;
+        }
+
+        // Print the process table every 0.5 simulated seconds
+        if (clock_shm->seconds * 1000 + clock_shm->nanoseconds / 1000000 >= last_print_time + 500) {
+            printProcessTable();
+            last_print_time = clock_shm->seconds * 1000 + clock_shm->nanoseconds / 1000000;
+        }
+
+        usleep(100000);
     }
 
-    // Final Summary
-    printf("\nFinal Summary:\n");
-    printf("Total workers launched: %d\n", processCount);
-    printf("Total messages sent: %d\n", totalMessagesSent);
-
-    fprintf(logFile, "\nFinal Summary:\n");
-    fprintf(logFile, "Total workers launched: %d\n", processCount);
-    fprintf(logFile, "Total messages sent: %d\n", totalMessagesSent);
-    fflush(logFile);
-
-    cleanup(0);
-    return 0;
-}
-
-// Increment Clock Based on Active Processes
-void incrementClock(int processes) {
-    if (processes == 0) processes = 1;
-    shmClock[1] += 250000000 / processes;
-    if (shmClock[1] >= BILLION) {
-        shmClock[0]++;
-        shmClock[1] -= BILLION;
-    }
-}
-
-// Print Process Table
-void printProcessTable() {
-    printf("\nOSS PID:%d SysClockS:%d SysClockNano:%d\n", getpid(), shmClock[0], shmClock[1]);
-    printf("Process Table:\n");
-    printf("Entry\tOccupied\tPID\tStartS\tStartN\tMessagesSent\n");
-
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        printf("%d\t%d\t%d\t%d\t%d\t%d\n",
-               i, processTable[i].occupied, processTable[i].pid,
-               processTable[i].startSeconds, processTable[i].startNano,
-               processTable[i].messagesSent);
-    }
-}
-
-// Find an Empty Slot in the Process Table
-int findEmptyPCBSlot() {
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (!processTable[i].occupied) return i;
-    }
-    return -1;
-}
-
-// Launch a Worker Process
-void launchWorker(int slot, int maxTime) {
-    int randSec = 1 + (rand() % maxTime);
-    int randNano = rand() % BILLION;
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        char secArg[10], nanoArg[10];
-        sprintf(secArg, "%d", randSec);
-        sprintf(nanoArg, "%d", randNano);
-        execl("./worker", "./worker", secArg, nanoArg, NULL);
-        perror("execl failed");
-        exit(1);
-    }
-
-    processTable[slot] = (PCB){1, pid, shmClock[0], shmClock[1], 0};
-    processCount++;
-    activeProcesses++;
-}
-
-// Cleanup Shared Memory & Message Queue
-void cleanup(int signal) {
-    msgctl(msgQueueID, IPC_RMID, NULL);
-    shmctl(shmClockID, IPC_RMID, NULL);
-    shmdt(shmClock);
-    fclose(logFile);
-    printf("\nCleaned up resources. Exiting...\n");
-    exit(0);
+    cleanup(0);  // Call cleanup to print final summary and exit
 }
